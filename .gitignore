@@ -8,6 +8,8 @@
 **/*.tar.gz
 **/playground
 **/wandb
+generated_codes/
+*.whl*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
