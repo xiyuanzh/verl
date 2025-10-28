@@ -20,17 +20,23 @@ from verl.workers.reward_manager.abstract import AbstractRewardManager
 # Global counter for saving generated code
 _code_counter = 0
 
+def _log_error(code_id: int, error_msg: str, stderr: str):
+    """Log execution errors to file"""
+    os.makedirs("execution_logs", exist_ok=True)
+    with open(f"execution_logs/error_{code_id:04d}.txt", 'w') as f:
+        f.write(f"Error: {error_msg}\n")
+        f.write(f"Stderr: {stderr}\n")
+
 def clean_generated_code(code: str) -> str:
-    """Clean generated code by removing markdown and chat tokens"""
-    code = re.sub(r'```python\s*', '', code)
-    code = re.sub(r'```\s*', '', code)
-    code = re.sub(r'<\|im_end\|>', '', code)
-    code = re.sub(r'<\|im_start\|>', '', code)
-    code = re.sub(r'<\|.*?\|>', '', code)
+    """Extract Python script from LLM output"""
+    python_blocks = re.findall(r'```python\s*\n(.*?)\n```', code, re.DOTALL)
+    if python_blocks:
+        code = python_blocks[0]
+    
     return code.strip()
 
 def execute_code_safely(code: str, historical_data: List[float], 
-                        future_count: int, timeout: int = 30) -> Tuple[float, Optional[np.ndarray], str]:
+                        future_count: int, train_dir: str = "", val_dir: str = "", timeout: int = 30) -> Tuple[float, Optional[np.ndarray], str]:
     """Execute generated code safely and return predictions"""
     global _code_counter
     _code_counter += 1
@@ -48,7 +54,7 @@ def execute_code_safely(code: str, historical_data: List[float],
                 f.write(code)
             
             result = subprocess.run(
-                [sys.executable, code_file],
+                [sys.executable, code_file, "--train_dir", train_dir, "--val_dir", val_dir],
                 cwd=temp_dir,
                 capture_output=True,
                 text=True,
@@ -85,14 +91,22 @@ def execute_code_safely(code: str, historical_data: List[float],
                         return 1.0, predictions, "Success"
                     
                 except Exception as e:
-                    return 0.1, None, f"Failed to read predictions: {str(e)}"
+                    error_msg = f"Failed to read predictions: {str(e)}"
+                    _log_error(_code_counter, error_msg, result.stderr)
+                    return 0.1, None, error_msg
             else:
-                return 0.1, None, f"No submission file created. stderr: {result.stderr[:200]}"
+                error_msg = f"No submission file created. stderr: {result.stderr[:200]}"
+                _log_error(_code_counter, error_msg, result.stderr)
+                return 0.1, None, error_msg
                 
     except subprocess.TimeoutExpired:
-        return 0, None, "Code execution timed out"
+        error_msg = "Code execution timed out"
+        _log_error(_code_counter, error_msg, "")
+        return 0, None, error_msg
     except Exception as e:
-        return 0, None, f"Execution error: {str(e)}"
+        error_msg = f"Execution error: {str(e)}"
+        _log_error(_code_counter, error_msg, "")
+        return 0, None, error_msg
 
 def calculate_forecasting_reward(predictions: np.ndarray, ground_truth: np.ndarray) -> float:
     """Calculate reward based on forecasting accuracy"""
@@ -142,6 +156,8 @@ class TimeSeriesRewardManager(AbstractRewardManager):
             extra_info = data_item.non_tensor_batch.get('extra_info', {})
             historical_data = extra_info.get('past_data', [])
             ground_truth = extra_info.get('future_data', [])
+            train_dir = data_item.non_tensor_batch.get('train_dir', '')
+            val_dir = data_item.non_tensor_batch.get('val_dir', '')
             
             if isinstance(historical_data, str):
                 historical_data = ast.literal_eval(historical_data)
@@ -155,7 +171,7 @@ class TimeSeriesRewardManager(AbstractRewardManager):
             # Execute code
             try:
                 exe_reward, predictions, error_msg = execute_code_safely(
-                    response_str, historical_data, future_count
+                    response_str, historical_data, future_count, train_dir, val_dir
                 )
                 
                 execution_success = exe_reward > 0.5

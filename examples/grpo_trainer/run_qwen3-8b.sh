@@ -8,8 +8,8 @@ set -x
 
 python3 -m verl.trainer.main_ppo \
     algorithm.adv_estimator=grpo \
-    data.train_files=$HOME/data/parquet/train_grpo.parquet \
-    data.val_files=$HOME/data/parquet/test_grpo.parquet \
+    data.train_files=$HOME/data/parquet/train_path.parquet \
+    data.val_files=$HOME/data/parquet/test_path.parquet \
     data.train_batch_size=16 \
     data.max_prompt_length=10000 \
     data.max_response_length=8192 \

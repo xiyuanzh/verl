@@ -9,6 +9,8 @@
 **/playground
 **/wandb
 generated_codes/
+generated_submission/
+execution_logs/
 *.whl*
 
 # Byte-compiled / optimized / DLL files
