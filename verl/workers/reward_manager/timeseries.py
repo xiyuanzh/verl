@@ -10,6 +10,7 @@ import torch
 import re
 import shutil
 import ast
+from datetime import datetime
 from typing import List, Tuple, Optional
 from collections import defaultdict
 
@@ -20,10 +21,13 @@ from verl.workers.reward_manager.abstract import AbstractRewardManager
 # Global counter for saving generated code
 _code_counter = 0
 
+root_folder = f'/fsx/s3/chronos-o1/verl/{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+
 def _log_error(code_id: int, error_msg: str, stderr: str):
     """Log execution errors to file"""
-    os.makedirs("execution_logs", exist_ok=True)
-    with open(f"execution_logs/error_{code_id:04d}.txt", 'w') as f:
+    log_dir = os.path.join(root_folder, "execution_logs")
+    os.makedirs(log_dir, exist_ok=True)
+    with open(os.path.join(log_dir, f"error_{code_id:04d}.txt"), 'w') as f:
         f.write(f"Error: {error_msg}\n")
         f.write(f"Stderr: {stderr}\n")
 
@@ -43,8 +47,9 @@ def execute_code_safely(code: str, historical_data: List[float],
 
     code = clean_generated_code(code)
     
-    os.makedirs("generated_codes", exist_ok=True)
-    with open(f"generated_codes/code_{_code_counter:04d}.py", 'w') as f:
+    codes_dir = os.path.join(root_folder, "generated_codes")
+    os.makedirs(codes_dir, exist_ok=True)
+    with open(os.path.join(codes_dir, f"code_{_code_counter:04d}.py"), 'w') as f:
         f.write(code)
     
     try:
@@ -64,8 +69,9 @@ def execute_code_safely(code: str, historical_data: List[float],
             submission_path = os.path.join(temp_dir, "submission.csv")
 
             if os.path.exists(submission_path):
-                os.makedirs("generated_submission", exist_ok=True)
-                shutil.copy2(submission_path, f"generated_submission/submission_{_code_counter:04d}.csv")
+                submission_dir = os.path.join(root_folder, "generated_submission")
+                os.makedirs(submission_dir, exist_ok=True)
+                shutil.copy2(submission_path, os.path.join(submission_dir, f"submission_{_code_counter:04d}.csv"))
 
                 try:
                     pred_df = pd.read_csv(submission_path)

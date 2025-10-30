@@ -1,0 +1,7 @@
+statsforecast
+statsmodels
+torchtext
+nltk
+gluonts
+pytorch_lightning
+sentence_transformers
