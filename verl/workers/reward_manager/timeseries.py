@@ -10,7 +10,6 @@ import torch
 import re
 import shutil
 import ast
-from datetime import datetime
 from typing import List, Tuple, Optional
 from collections import defaultdict
 
@@ -20,14 +19,13 @@ from verl.workers.reward_manager.abstract import AbstractRewardManager
 
 # Global counter for saving generated code
 _code_counter = 0
-
-root_folder = f'/fsx/s3/chronos-o1/verl/{datetime.now().strftime("%Y%m%d_%H%M%S")}'
+root_folder = os.environ.get('VERL_OUTPUT_DIR') + '/'
+#root_folder = '/fsx/ubuntu/users/boranhan/mmts/qwen32b-code-mmts-0010/'
 
 def _log_error(code_id: int, error_msg: str, stderr: str):
     """Log execution errors to file"""
-    log_dir = os.path.join(root_folder, "execution_logs")
-    os.makedirs(log_dir, exist_ok=True)
-    with open(os.path.join(log_dir, f"error_{code_id:04d}.txt"), 'w') as f:
+    os.makedirs(root_folder+"execution_logs", exist_ok=True)
+    with open(root_folder+f"execution_logs/error_{code_id:04d}.txt", 'w') as f:
         f.write(f"Error: {error_msg}\n")
         f.write(f"Stderr: {stderr}\n")
 
@@ -40,16 +38,15 @@ def clean_generated_code(code: str) -> str:
     return code.strip()
 
 def execute_code_safely(code: str, historical_data: List[float], 
-                        future_count: int, train_dir: str = "", val_dir: str = "", timeout: int = 30) -> Tuple[float, Optional[np.ndarray], str]:
+                        future_count: int, train_dir: str = "", val_dir: str = "", timeout: int = 1200) -> Tuple[float, Optional[np.ndarray], str]:
     """Execute generated code safely and return predictions"""
     global _code_counter
     _code_counter += 1
 
     code = clean_generated_code(code)
     
-    codes_dir = os.path.join(root_folder, "generated_codes")
-    os.makedirs(codes_dir, exist_ok=True)
-    with open(os.path.join(codes_dir, f"code_{_code_counter:04d}.py"), 'w') as f:
+    os.makedirs(root_folder+"generated_codes", exist_ok=True)
+    with open(root_folder+f"generated_codes/code_{_code_counter:04d}.py", 'w') as f:
         f.write(code)
     
     try:
@@ -69,9 +66,8 @@ def execute_code_safely(code: str, historical_data: List[float],
             submission_path = os.path.join(temp_dir, "submission.csv")
 
             if os.path.exists(submission_path):
-                submission_dir = os.path.join(root_folder, "generated_submission")
-                os.makedirs(submission_dir, exist_ok=True)
-                shutil.copy2(submission_path, os.path.join(submission_dir, f"submission_{_code_counter:04d}.csv"))
+                os.makedirs(root_folder+"generated_submission", exist_ok=True)
+                shutil.copy2(submission_path, root_folder+f"generated_submission/submission_{_code_counter:04d}.csv")
 
                 try:
                     pred_df = pd.read_csv(submission_path)
@@ -113,16 +109,66 @@ def execute_code_safely(code: str, historical_data: List[float],
         error_msg = f"Execution error: {str(e)}"
         _log_error(_code_counter, error_msg, "")
         return 0, None, error_msg
+    
 
-def calculate_forecasting_reward(predictions: np.ndarray, ground_truth: np.ndarray) -> float:
+'''
+def calculate_forecasting_reward(predictions: np.ndarray, ground_truth: np.ndarray, historical_data: np.ndarray) -> float:
     """Calculate reward based on forecasting accuracy"""
     assert len(predictions) == len(ground_truth), "Prediction and ground truth lengths do not match"
-    
-    mse = np.mean((predictions - ground_truth) ** 2)
-    scale_factor = 10000  
-    accuracy_reward = max(0, 1 - mse / scale_factor)
+    mae = np.mean(np.abs(predictions - ground_truth))
+    mad = np.mean(np.abs(historical_data - np.mean(historical_data)))
+    accuracy_reward = np.exp(-mae / (mad + 1e-8))
+    #mse = np.mean((predictions - ground_truth) ** 2)/np.mean(historical_data ** 2+ 1e-8)
+    #accuracy_reward = max(0, 1 - mse/10)
     
     return accuracy_reward
+'''
+
+def calculate_forecasting_reward(predictions: np.ndarray,
+                                 ground_truth: np.ndarray,
+                                 historical_data: np.ndarray,
+                                 min_var_frac: float = 0.05) -> float:
+    """
+    Reward for time-series forecasting accuracy with anti-persistence bias.
+    Combines:
+      - advantage over a naive "last value" baseline
+      - penalty for overly constant (low-variance) forecasts
+      - exponential scaling for smoothness
+
+    Returns a scalar reward in (0, 1].
+    """
+    assert len(predictions) == len(ground_truth), \
+        "Prediction and ground truth lengths do not match"
+
+    # ----- 1. Basic MAE-normalized accuracy term -----
+    mae = np.mean(np.abs(predictions - ground_truth))
+    mad = np.mean(np.abs(historical_data - np.mean(historical_data))) + 1e-8
+    base_acc = np.exp(-mae / mad)
+
+    # ----- 2. Advantage over persistence baseline -----
+    last_val = historical_data[-1]
+    baseline_pred = np.full_like(ground_truth, last_val)
+    baseline_mae = np.mean(np.abs(baseline_pred - ground_truth))
+    baseline_acc = np.exp(-baseline_mae / mad)
+
+    advantage = base_acc - baseline_acc  # >0 means better than persistence
+    # squash to (0,1) via sigmoid-like mapping
+    adv_term = 1 / (1 + np.exp(-5 * advantage))
+
+    # ----- 3. Variance penalty (discourage constant forecasts) -----
+    hist_var = np.var(historical_data) + 1e-8
+    pred_var = np.var(predictions)
+    required = min_var_frac * hist_var
+    var_penalty = np.maximum(0.0, (required - pred_var) / required)
+    var_term = np.exp(-var_penalty)  # ∈ (0,1], lower if too flat
+
+    # ----- 4. Combine terms -----
+    # weights: advantage 0.6, variance 0.4 (tune as needed)
+    reward = 0.6 * adv_term + 0.4 * var_term
+
+    # clamp numeric range
+    reward = float(np.clip(reward, 0.0, 1.0))
+    return reward
 
 @register("timeseries")
 class TimeSeriesRewardManager(AbstractRewardManager):
@@ -192,7 +238,7 @@ class TimeSeriesRewardManager(AbstractRewardManager):
                     predictions = np.zeros(future_count)
                 else:
                     try:
-                        accuracy_reward = calculate_forecasting_reward(predictions, ground_truth)
+                        accuracy_reward = calculate_forecasting_reward(predictions, ground_truth, historical_data)
                     except Exception as e:
                         accuracy_reward = 0.0
                         predictions = np.zeros(future_count)
