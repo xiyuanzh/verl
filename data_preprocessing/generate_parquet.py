@@ -8,6 +8,15 @@ import pandas as pd
 from pathlib import Path
 from datasets import Dataset, DatasetDict
 import random
+from verl.ts_models.ts_forecasting_template import TSFM_TEMPLATES, LLM_FORECASTING_TEMPLATES, UNIMODAL_FORECASTING_TEMPLATES
+
+MODEL_POOL = [
+    "amazon/chronos-t5-small",
+    "PatchTST",
+    "DLinear",
+    "iTransformer",
+    "gpt2",
+]
 
 def get_code_files(sft_dir):
     """Get all Python files from sft directory"""
@@ -45,6 +54,14 @@ def create_code_generation_example(past_data, future_data, context, task_folder,
         for i in range(len(timestamps)):
             cov_values = [round(past_data.iloc[i, j], 2) for j in range(1, past_data.shape[1]-1)]
             covariate_values.append(cov_values)
+    
+    selected_model = random.choice(MODEL_POOL)
+    if "chronos" in selected_model:
+        selected_template = TSFM_TEMPLATES(selected_model)
+    elif "gpt2" in selected_model:
+        selected_template = LLM_FORECASTING_TEMPLATES(selected_model)
+    else:
+        selected_template = UNIMODAL_FORECASTING_TEMPLATES(selected_model)
     
     # Create input prompt
     input_prompt = f"""Multimodal Time Series Forecasting Challenge
@@ -149,6 +166,9 @@ past_target = past_data[:, -1].astype(np.float32)
 - The prediction length must match the length of `future_time.csv` in `train_dir`. The `submission.csv` must have the same format as `future_time.csv` where each row corresponds to a time step.
 - Some text embedding models have maximum token length so you need to select the most important part of context as input to the text embedding model. For example, maximum token length for `bert-base-uncased` is 512.
 - Time series forecasting means predicting all future values across the forecasting horizon, not just a single next step. For regression-based approaches, use models like MultiOutputRegressor to predict multiple steps simultaneously. The model should take the entire past time series as input and output the full sequence of future values in one forward pass.
+
+## Example Model:
+Below is an example model code snippet for reference: {selected_template}
 
 Remember to avoid future information leakage in your model development process. Do not overthink and prioritize generating Python script."""
     
