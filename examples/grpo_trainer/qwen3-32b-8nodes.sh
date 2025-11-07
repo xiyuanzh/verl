@@ -39,9 +39,9 @@ python3 -m verl.trainer.main_ppo \
   trainer.critic_warmup=0 \
   trainer.logger='["console","wandb"]' \
   trainer.project_name='verl_grpo' \
-  trainer.experiment_name='qwen3_32b_8nodes' \
+  trainer.experiment_name='qwen3_32b_8nodes_var_penalty_exe_reward_timeout_300' \
   trainer.n_gpus_per_node=8 \
   trainer.nnodes=8 \
-  trainer.save_freq=1 \
+  trainer.save_freq=5 \
   trainer.test_freq=2 \
   trainer.total_epochs=15

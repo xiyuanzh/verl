@@ -11,6 +11,8 @@
 generated_codes/
 generated_submission/
 execution_logs/
+execution_time.txt
+core.*
 *.whl*
 
 # Byte-compiled / optimized / DLL files
