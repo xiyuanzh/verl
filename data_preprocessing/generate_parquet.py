@@ -55,12 +55,12 @@ You are tasked with developing a multimodal time series forecasting model that l
 ## Dataset Description
 - You will have access to training data provided as named argument `--train_dir`, which is a directory containing training samples in numbered folders (1/, 2/, 3/, etc.)
 - Each training sample folder contains a `past_time.csv` for historical data (1st column=timestamp, last column=target, middle columns=covariates), a `future_time.csv` for future data to predict (same format as past_time.csv), a `context` or `context.csv` for context (`context` for static text context for the entire series, OR `context.csv` for time-aligned dynamic context if context changes over time, check if context or context.csv exists and load correspondingly)
-- You will also have access to the validation data provided as named argument `--val_dir`, which is the same format as `train_dir`
+- You will also have access to the validation data provided as named argument `--val_dir`, which is the same format as `train_dir` except removing `future_time.csv` to avoid data leakage, so do not attempt to load `future_time.csv` from `val_dir`
 - Preview of `past_time.csv` in one sample folder of `val_dir`: target values {past_values[:100]}, covariate names = {covariate_names if covariate_names else 'None'}, covariate values = {covariate_values if covariate_values else 'None'}
-- Preview of context in one sample folder of `val_dir`: {context[:100]}
+- Preview of context in one sample folder of `val_dir`: {context[:500]}
 
 ## Objective
-Predict future values for all validation samples using both historical numerical patterns and textual context information.
+Predict future values for all validation samples using both historical numerical patterns and textual context information. Load `future_time.csv` in `train_dir` to get future length.
 
 ## Evaluation Metric
 Models will be evaluated using Mean Squared Error (MSE) between predicted and actual future values:
@@ -79,7 +79,7 @@ Submit predictions in a CSV file named `submission.csv`:
 4. **Feature Engineering**: Consider effective feature preprocessing to extract temporal patterns and semantic relationships from context
 
 ## Modeling Approaches
-You can use any combination of the following approaches. Consider different strategies across iterations to increase solution diversity:
+You can use any combination of the following approaches. You have access to GPU so make sure to load models on GPU when possible for faster computations. Consider different strategies across iterations to increase solution diversity:
 
 ### 1. Feature Preprocessing
 - Covariate selection
@@ -131,7 +131,7 @@ You can use any combination of the following approaches. Consider different stra
 - Read and parse the validation time series and context text from `val_dir`. Do not copy paste the above preview time series and context in the generated code.
 - Appropriate feature preprocessing
 - Process text data (context selection or summarization if needed, tokenization, encoding)
-- Ensure predictions match the length of `future_time.csv`
+- Ensure predictions match the length of `future_time.csv` in `train_dir`
 
 ## Implementation Requirements:
 - Take two named arguments: `--train_dir` and `--val_dir`
@@ -140,7 +140,17 @@ You can use any combination of the following approaches. Consider different stra
 - Concatenate predictions from all validation samples in order (sample 1, 2, 3, etc.)
 - Save concatenated results as `submission.csv` in the current directory
 
-Remember to avoid future information leakage in your model development process."""
+## Additional Notes:
+- Example code to load data. Make sure to load target time series as floating-point type.
+```python
+past_data = pd.read_csv(os.path.join(sample_path, 'past_time.csv')).values
+past_target = past_data[:, -1].astype(np.float32)
+```
+- The prediction length must match the length of `future_time.csv` in `train_dir`. The `submission.csv` must have the same format as `future_time.csv` where each row corresponds to a time step.
+- Some text embedding models have maximum token length so you need to select the most important part of context as input to the text embedding model. For example, maximum token length for `bert-base-uncased` is 512.
+- Time series forecasting means predicting all future values across the forecasting horizon, not just a single next step. For regression-based approaches, use models like MultiOutputRegressor to predict multiple steps simultaneously. The model should take the entire past time series as input and output the full sequence of future values in one forward pass.
+
+Remember to avoid future information leakage in your model development process. Do not overthink and prioritize generating Python script."""
     
     # Get random code sample
     random_code = get_random_code_sample(code_files)
@@ -224,8 +234,8 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cik_dir', type=str, default='/home/ubuntu/data/finance-7/')
-    parser.add_argument('--sft_dir', type=str, default='/home/ubuntu/data/sft/')
-    parser.add_argument('--output_dir', type=str, default='/home/ubuntu/data/parquet/')
+    parser.add_argument('--cik_dir', type=str, default='/fsx/chronos-o1/dataset/finance-7/')
+    parser.add_argument('--sft_dir', type=str, default='/fsx/chronos-o1/sft/')
+    parser.add_argument('--output_dir', type=str, default='./')
     args = parser.parse_args()
     main(args)
