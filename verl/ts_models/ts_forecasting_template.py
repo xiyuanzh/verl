@@ -67,8 +67,8 @@ def UNIMODAL_FORECASTING_TEMPLATES(model_name):
                 self.top_k = 5
                 self.num_kernels = 6
 
-        batch_x = torch.randn(batch_size, input_length, feature_number).cuda()
-        batch_y = torch.randn(batch_size, input_length, feature_number).cuda()
+        batch_x = torch.randn(batch_size, past_length, feature_number).cuda()
+        batch_y = torch.randn(batch_size, future_length, feature_number).cuda()
 
         configs = Config(
             seq_len=batch_x.shape[1],
