@@ -1,5 +1,5 @@
 """
-CiK code generation dataset creation from raw data
+CiK code generation dataset creation from raw data with random sampling
 """
 
 import os
@@ -9,6 +9,15 @@ from pathlib import Path
 from datasets import Dataset, DatasetDict
 import random
 from tqdm import tqdm
+from verl.ts_models.ts_forecasting_template import TSFM_TEMPLATES, LLM_FORECASTING_TEMPLATES, UNIMODAL_FORECASTING_TEMPLATES
+
+MODEL_POOL = [
+    "amazon/chronos-t5-small",
+    "PatchTST",
+    "DLinear",
+    "iTransformer",
+    "gpt2",
+]
 
 def get_code_files(sft_dir):
     """Get all Python files from sft directory"""
@@ -46,6 +55,14 @@ def create_code_generation_example(past_data, future_data, context, task_folder,
         for i in range(len(timestamps)):
             cov_values = [round(past_data.iloc[i, j], 2) for j in range(1, past_data.shape[1]-1)]
             covariate_values.append(cov_values)
+
+    selected_model = random.choice(MODEL_POOL)
+    if "chronos" in selected_model:
+        selected_template = TSFM_TEMPLATES(selected_model)
+    elif "gpt2" in selected_model:
+        selected_template = LLM_FORECASTING_TEMPLATES(selected_model)
+    else:
+        selected_template = UNIMODAL_FORECASTING_TEMPLATES(selected_model)
     
     # Create input prompt
     input_prompt = f"""Multimodal Time Series Forecasting Challenge
@@ -58,10 +75,10 @@ You are tasked with developing a multimodal time series forecasting model that l
 - Each training sample folder contains a `past_time.csv` for historical data (1st column=timestamp, last column=target, middle columns=covariates), a `future_time.csv` for future data to predict (same format as past_time.csv), a `context` or `context.csv` for context (`context` for static text context for the entire series, OR `context.csv` for time-aligned dynamic context if context changes over time, check if context or context.csv exists and load correspondingly)
 - You will also have access to the validation data provided as named argument `--val_dir`, which is the same format as `train_dir` except removing `future_time.csv` to avoid data leakage
 - Preview of `past_time.csv` in one sample folder of `val_dir`: target values {past_values[:100]}, covariate names = {covariate_names if covariate_names else 'None'}, covariate values = {covariate_values if covariate_values else 'None'}
-- Preview of context in one sample folder of `val_dir`: {context[:100]}
+- Preview of context in one sample folder of `val_dir`: {context[:500]}
 
 ## Objective
-Predict future values for all validation samples using both historical numerical patterns and textual context information.
+Predict future values for all validation samples using both historical numerical patterns and textual context information. Load `future_time.csv` in `train_dir` to get future length.
 
 ## Evaluation Metric
 Models will be evaluated using Mean Squared Error (MSE) between predicted and actual future values:
@@ -151,7 +168,10 @@ past_target = past_data[:, -1].astype(np.float32)
 - Some text embedding models have maximum token length so you need to select the most important part of context as input to the text embedding model. For example, maximum token length for `bert-base-uncased` is 512.
 - Time series forecasting means predicting all future values across the forecasting horizon, not just a single next step. For regression-based approaches, use models like MultiOutputRegressor to predict multiple steps simultaneously. The model should take the entire past time series as input and output the full sequence of future values in one forward pass.
 
-Remember to avoid future information leakage in your model development process."""
+## Example Model:
+Below is an example model code snippet for reference: {selected_template}
+
+Remember to avoid future information leakage in your model development process. Do not overthink and prioritize generating Python script."""
     
     # Get random code sample
     random_code = get_random_code_sample(code_files)
@@ -181,11 +201,11 @@ Remember to avoid future information leakage in your model development process."
 
     return example
 
-def build_code_dataset(data_dir, code_files, data_split, cik_dir):
-    """Build code generation dataset for train/test split"""
+def build_code_dataset(data_dir, code_files, data_split, cik_dir, sample_indices):
+    """Build code generation dataset for specified sample indices"""
     examples = []
     
-    for sample_idx in sorted([d.name for d in Path(data_dir).iterdir() if d.is_dir()], key=int):
+    for sample_idx in sample_indices:
         sample_path = Path(data_dir) / str(sample_idx)
         
         if not sample_path.exists():
@@ -202,6 +222,8 @@ def build_code_dataset(data_dir, code_files, data_split, cik_dir):
         elif (sample_path / 'context.csv').exists():
             context_df = pd.read_csv(sample_path / 'context.csv')
             context = ' '.join(str(context_df.iloc[i, -1]) for i in range(len(context_df)))
+        else:
+            context = ""
 
         # Create code generation example
         example = create_code_generation_example(
@@ -211,7 +233,17 @@ def build_code_dataset(data_dir, code_files, data_split, cik_dir):
 
     return examples
 
+def sample_indices(total_count, target_count):
+    """Sample indices randomly, use all if not enough"""
+    all_indices = list(range(1, total_count + 1))
+    if total_count <= target_count:
+        return all_indices
+    return sorted(random.sample(all_indices, target_count))
+
 def main(args):
+    # Set random seed for reproducibility
+    random.seed(args.seed)
+    
     # Create output directories
     output_dir = Path(args.output_dir)
     output_dir.mkdir(exist_ok=True)
@@ -221,44 +253,81 @@ def main(args):
     
     # Collect all examples from multiple cik_dirs
     all_train_examples = []
+    all_eval_examples = []
     all_test_examples = []
     
     for cik_dir in tqdm(args.cik_dirs):
         data_path = Path(cik_dir)
-        train_dir = data_path / 'val'
+        val_dir = data_path / 'val'
         test_dir = data_path / 'test'
         
-        # Build datasets for this cik_dir
-        if train_dir.exists():
-            train_examples = build_code_dataset(train_dir, code_files, 'val', cik_dir)
+        # Get total sample counts
+        if val_dir.exists():
+            val_sample_dirs = [d for d in val_dir.iterdir() if d.is_dir() and d.name.isdigit()]
+            total_val_samples = len(val_sample_dirs)
+            
+            # Sample 200 for training and 50 for eval from val directory
+            train_sample_indices = sample_indices(total_val_samples, args.train_samples)
+            
+            # For eval, sample from remaining indices if possible
+            remaining_indices = [i for i in range(1, total_val_samples + 1) if i not in train_sample_indices]
+            if remaining_indices:
+                eval_sample_indices = sample_indices(len(remaining_indices), args.eval_samples)
+                eval_sample_indices = [remaining_indices[i-1] for i in eval_sample_indices]
+            else:
+                # If not enough samples, use overlapping samples
+                eval_sample_indices = sample_indices(total_val_samples, args.eval_samples)
+            
+            # Build datasets
+            train_examples = build_code_dataset(val_dir, code_files, 'val', cik_dir, train_sample_indices)
+            eval_examples = build_code_dataset(val_dir, code_files, 'val', cik_dir, eval_sample_indices)
+            
             all_train_examples.extend(train_examples)
+            all_eval_examples.extend(eval_examples)
         
+        # Handle test directory
         if test_dir.exists():
-            test_examples = build_code_dataset(test_dir, code_files, 'test', cik_dir)
+            test_sample_dirs = [d for d in test_dir.iterdir() if d.is_dir() and d.name.isdigit()]
+            total_test_samples = len(test_sample_dirs)
+            
+            # Sample 50 for test
+            test_sample_indices = sample_indices(total_test_samples, args.test_samples)
+            test_examples = build_code_dataset(test_dir, code_files, 'test', cik_dir, test_sample_indices)
             all_test_examples.extend(test_examples)
     
     # Save as parquet files
     train_df = pd.DataFrame(all_train_examples)
-    test_df = pd.DataFrame(all_test_examples)
-    train_df.to_parquet(output_dir / 'all_train_path.parquet', index=False)
-    test_df.to_parquet(output_dir / 'all_test_path.parquet', index=False)
+    eval_df = pd.DataFrame(all_eval_examples)
+    train_df.to_parquet(output_dir / 'all_train_path_filter.parquet', index=False)
+    eval_df.to_parquet(output_dir / 'all_eval_path_filter.parquet', index=False)
     
     print(f"Parquet files saved to {output_dir}")
     print(f"Train samples: {len(all_train_examples)}")
-    print(f"Test samples: {len(all_test_examples)}")
+    print(f"Eval samples: {len(all_eval_examples)}")
+    
+    if all_test_examples:
+        test_df = pd.DataFrame(all_test_examples)
+        test_df.to_parquet(output_dir / 'all_test_path_filter.parquet', index=False)
+        print(f"Test samples: {len(all_test_examples)}")
+    else:
+        print("No test samples found")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--cik_dirs', type=str, nargs='+', 
-                        default=['/fsx/ubuntu/users/boranhan/mmts/all_data/finance-7/', 
-                                '/fsx/ubuntu/users/boranhan/mmts/all_data/finance-30/', 
-                                '/fsx/ubuntu/users/boranhan/mmts/all_data/LEU/',
-                                '/fsx/ubuntu/users/boranhan/mmts/all_data/MSPG/',
-                                '/fsx/ubuntu/users/boranhan/mmts/all_data/PTF/',
-                                '/fsx/ubuntu/users/boranhan/mmts/all_data/medical/',
-                                '/fsx/ubuntu/users/boranhan/mmts/all_data/weather/'
+                        default=['/fsx/ubuntu/users/boranhan/mmts/all_data/dataset/finance-7/', 
+                                '/fsx/ubuntu/users/boranhan/mmts/all_data/dataset/finance-30/', 
+                                '/fsx/ubuntu/users/boranhan/mmts/all_data/dataset/LEU/',
+                                '/fsx/ubuntu/users/boranhan/mmts/all_data/dataset/MSPG/',
+                                '/fsx/ubuntu/users/boranhan/mmts/all_data/dataset/PTF/',
+                                '/fsx/ubuntu/users/boranhan/mmts/all_data/dataset/medical/',
+                                '/fsx/ubuntu/users/boranhan/mmts/all_data/dataset/weather/'
                         ], help='List of cik directories')
     parser.add_argument('--sft_dir', type=str, default='/fsx/ubuntu/users/boranhan/mmts/data/sft/')
     parser.add_argument('--output_dir', type=str, default='/fsx/ubuntu/users/boranhan/mmts/data/parquet/')
+    parser.add_argument('--train_samples', type=int, default=200, help='Number of samples for training')
+    parser.add_argument('--eval_samples', type=int, default=50, help='Number of samples for evaluation')
+    parser.add_argument('--test_samples', type=int, default=50, help='Number of samples for test')
+    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
     args = parser.parse_args()
     main(args)
