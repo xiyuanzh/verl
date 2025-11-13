@@ -1,5 +1,3 @@
-# Copyright 2025 Zhejiang University (ZJU), China and TimeMaster Team.
-
 import os
 import sys
 import subprocess
@@ -10,273 +8,297 @@ import torch
 import re
 import shutil
 import ast
+import uuid
 from typing import List, Tuple, Optional
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 
 from verl import DataProto
 from verl.workers.reward_manager import register
 from verl.workers.reward_manager.abstract import AbstractRewardManager
 
-# Global counter for saving generated code
-_code_counter = 0
-root_folder = os.environ.get('VERL_OUTPUT_DIR') + '/'
-#root_folder = '/fsx/ubuntu/users/boranhan/mmts/qwen32b-code-mmts-0010/'
+# --- safer default for output dir ---
+_root_env = os.environ.get('VERL_OUTPUT_DIR')
+root_folder = (_root_env if _root_env else '/tmp/verl_outputs') + '/'
+os.makedirs(root_folder, exist_ok=True)
 
-def _log_error(code_id: int, error_msg: str, stderr: str):
-    """Log execution errors to file"""
-    os.makedirs(root_folder+"execution_logs", exist_ok=True)
-    with open(root_folder+f"execution_logs/error_{code_id:04d}.txt", 'w') as f:
+MAX_CONCURRENT = 16  # cap parallel executions
+
+# ---------- logging / helpers ----------
+def _log_error(job_id: str, error_msg: str, stderr: str):
+    os.makedirs(root_folder + "execution_logs", exist_ok=True)
+    with open(root_folder + f"execution_logs/error_{job_id}.txt", 'w') as f:
         f.write(f"Error: {error_msg}\n")
-        f.write(f"Stderr: {stderr}\n")
+        if stderr:
+            f.write(f"Stderr: {stderr}\n")
 
 def clean_generated_code(code: str) -> str:
-    """Extract Python script from LLM output"""
-    python_blocks = re.findall(r'```python\s*\n(.*?)\n```', code, re.DOTALL)
-    if python_blocks:
-        code = python_blocks[0]
-    
-    return code.strip()
+    block = re.findall(r'```python\s*\n(.*?)\n```', code, re.DOTALL)
+    return (block[0] if block else code).strip()
 
-def execute_code_safely(code: str, historical_data: List[float], 
-                        future_count: int, train_dir: str = "", val_dir: str = "", timeout: int = 1200) -> Tuple[float, Optional[np.ndarray], str]:
-    """Execute generated code safely and return predictions"""
-    global _code_counter
-    _code_counter += 1
-
+# ---------- EXECUTOR (now receives job_id) ----------
+def execute_code_safely(code: str,
+                        job_id: str,
+                        historical_data: List[float],
+                        future_count: int,
+                        train_dir: str = "",
+                        val_dir: str = "",
+                        timeout: int = 600) -> Tuple[float, Optional[np.ndarray], str]:
+    """
+    Run code that must write submission.csv; copy artifacts using job_id.
+    Returns (exe_reward, predictions or None, message).
+    """
     code = clean_generated_code(code)
-    
-    os.makedirs(root_folder+"generated_codes", exist_ok=True)
-    with open(root_folder+f"generated_codes/code_{_code_counter:04d}.py", 'w') as f:
+
+    # persist code for this job
+    os.makedirs(root_folder + "generated_codes", exist_ok=True)
+    with open(root_folder + f"generated_codes/code_{job_id}.py", 'w') as f:
         f.write(code)
-    
+
     try:
         with tempfile.TemporaryDirectory() as temp_dir:
             code_file = os.path.join(temp_dir, "forecast_code.py")
             with open(code_file, 'w') as f:
                 f.write(code)
-            
+
             result = subprocess.run(
                 [sys.executable, code_file, "--train_dir", train_dir, "--val_dir", val_dir],
-                cwd=temp_dir,
-                capture_output=True,
-                text=True,
-                timeout=timeout
+                cwd=temp_dir, capture_output=True, text=True, timeout=timeout
             )
-            
+
             submission_path = os.path.join(temp_dir, "submission.csv")
+            if not os.path.exists(submission_path):
+                err = f"No submission.csv created. stderr: {result.stderr[:200]}"
+                _log_error(job_id, err, result.stderr)
+                return 0.1, None, err
 
-            if os.path.exists(submission_path):
-                os.makedirs(root_folder+"generated_submission", exist_ok=True)
-                shutil.copy2(submission_path, root_folder+f"generated_submission/submission_{_code_counter:04d}.csv")
+            os.makedirs(root_folder + "generated_submission", exist_ok=True)
+            shutil.copy2(submission_path, root_folder + f"generated_submission/submission_{job_id}.csv")
 
-                try:
-                    pred_df = pd.read_csv(submission_path)
-                    predictions = pred_df.iloc[:, -1].values
-                    
-                    if len(predictions) != future_count:
-                        if len(predictions) > future_count:
-                            predictions = predictions[:future_count]
-                        else:
-                            pad_value = predictions[-1] if len(predictions) > 0 else np.mean(historical_data) if historical_data else 0.0
-                            predictions = np.concatenate([
-                                predictions, 
-                                [pad_value] * (future_count - len(predictions))
-                            ])
-                        return 0.5, predictions, "Prediction length mismatch, adjusted"
+            try:
+                pred_df = pd.read_csv(submission_path)
+                predictions = pred_df.iloc[:, -1].values
 
-                    elif np.any(np.isnan(predictions)) or np.any(np.isinf(predictions)):
-                        predictions[np.isnan(predictions)] = 0.0
-                        predictions[np.isinf(predictions)] = 0.0
-                        return 0.8, predictions, "Predictions contain NaN or Inf"
-                    
+                if len(predictions) != future_count:
+                    if len(predictions) > future_count:
+                        predictions = predictions[:future_count]
                     else:
-                        return 1.0, predictions, "Success"
-                    
-                except Exception as e:
-                    error_msg = f"Failed to read predictions: {str(e)}"
-                    _log_error(_code_counter, error_msg, result.stderr)
-                    return 0.1, None, error_msg
-            else:
-                error_msg = f"No submission file created. stderr: {result.stderr[:200]}"
-                _log_error(_code_counter, error_msg, result.stderr)
-                return 0.1, None, error_msg
-                
+                        pad_value = predictions[-1] if len(predictions) > 0 else (
+                            np.mean(historical_data) if len(historical_data) > 0 else 0.0
+                        )
+                        predictions = np.concatenate([predictions, [pad_value] * (future_count - len(predictions))])
+                    return 0.5, predictions, "Prediction length mismatch, adjusted"
+
+                if np.any(~np.isfinite(predictions)):
+                    predictions = np.nan_to_num(predictions, nan=0.0, posinf=0.0, neginf=0.0)
+                    return 0.8, predictions, "Predictions contained NaN/Inf"
+
+                return 1.0, predictions, "Success"
+
+            except Exception as e:
+                err = f"Failed to read predictions: {e}"
+                _log_error(job_id, err, result.stderr)
+                return 0.1, None, err
+
     except subprocess.TimeoutExpired:
-        error_msg = "Code execution timed out"
-        _log_error(_code_counter, error_msg, "")
-        return 0, None, error_msg
+        err = "Code execution timed out"
+        _log_error(job_id, err, "")
+        return 0.0, None, err
     except Exception as e:
-        error_msg = f"Execution error: {str(e)}"
-        _log_error(_code_counter, error_msg, "")
-        return 0, None, error_msg
-    
+        err = f"Execution error: {e}"
+        _log_error(job_id, err, "")
+        return 0.0, None, err
 
-'''
-def calculate_forecasting_reward(predictions: np.ndarray, ground_truth: np.ndarray, historical_data: np.ndarray) -> float:
-    """Calculate reward based on forecasting accuracy"""
+# ---------- reward (unchanged from your latest version) ----------
+def calculate_forecasting_reward(
+    predictions: np.ndarray,
+    ground_truth: np.ndarray,
+    historical_data: np.ndarray,
+    *,
+    tail_gamma: float = 1.25,
+    min_var_frac: float = 0.05,
+    use_delta: bool = True,
+    delta_weight: float = 0.10,
+    var_weight: float = 0.30,
+) -> float:
     assert len(predictions) == len(ground_truth), "Prediction and ground truth lengths do not match"
-    mae = np.mean(np.abs(predictions - ground_truth))
-    mad = np.mean(np.abs(historical_data - np.mean(historical_data)))
-    accuracy_reward = np.exp(-mae / (mad + 1e-8))
-    #mse = np.mean((predictions - ground_truth) ** 2)/np.mean(historical_data ** 2+ 1e-8)
-    #accuracy_reward = max(0, 1 - mse/10)
-    
-    return accuracy_reward
-'''
 
-def calculate_forecasting_reward(predictions: np.ndarray,
-                                 ground_truth: np.ndarray,
-                                 historical_data: np.ndarray,
-                                 min_var_frac: float = 0.05) -> float:
-    """
-    Reward for time-series forecasting accuracy with anti-persistence bias.
-    Combines:
-      - advantage over a naive "last value" baseline
-      - penalty for overly constant (low-variance) forecasts
-      - exponential scaling for smoothness
+    T = len(ground_truth)
+    idx = np.arange(1, T + 1, dtype=float)
+    w = idx ** float(tail_gamma)
+    w = w / (w.sum() + 1e-12)
 
-    Returns a scalar reward in (0, 1].
-    """
-    assert len(predictions) == len(ground_truth), \
-        "Prediction and ground truth lengths do not match"
+    hist = np.asarray(historical_data, dtype=float)
+    mad_lvl = np.mean(np.abs(hist - hist.mean())) + 1e-8
 
-    # ----- 1. Basic MAE-normalized accuracy term -----
-    mae = np.mean(np.abs(predictions - ground_truth))
-    mad = np.mean(np.abs(historical_data - np.mean(historical_data))) + 1e-8
-    base_acc = np.exp(-mae / mad)
+    mae_lvl = np.sum(w * np.abs(predictions - ground_truth))
+    base_acc_lvl = np.exp(-mae_lvl / mad_lvl)
 
-    # ----- 2. Advantage over persistence baseline -----
-    last_val = historical_data[-1]
-    baseline_pred = np.full_like(ground_truth, last_val)
-    baseline_mae = np.mean(np.abs(baseline_pred - ground_truth))
-    baseline_acc = np.exp(-baseline_mae / mad)
+    baseline_lvl = np.full_like(ground_truth, hist[-1])
+    baseline_mae_lvl = np.sum(w * np.abs(baseline_lvl - ground_truth))
+    baseline_acc_lvl = np.exp(-baseline_mae_lvl / mad_lvl)
 
-    advantage = base_acc - baseline_acc  # >0 means better than persistence
-    # squash to (0,1) via sigmoid-like mapping
-    adv_term = 1 / (1 + np.exp(-5 * advantage))
+    advantage_lvl = base_acc_lvl - baseline_acc_lvl
+    adv_term = 1.0 / (1.0 + np.exp(-5.0 * advantage_lvl))
 
-    # ----- 3. Variance penalty (discourage constant forecasts) -----
-    hist_var = np.var(historical_data) + 1e-8
+    delta_adv_term = 0.0
+    if use_delta and T > 0:
+        start_val = hist[-1]
+        pred_d = np.diff(np.concatenate([[start_val], predictions]))
+        gt_d   = np.diff(np.concatenate([[start_val], ground_truth]))
+        hist_d = np.diff(hist) if len(hist) > 1 else np.array([0.0], dtype=float)
+        mad_d = (np.mean(np.abs(hist_d - hist_d.mean())) if len(hist_d) > 0 else 1.0) + 1e-8
+
+        mae_d = np.sum(w * np.abs(pred_d - gt_d))
+        base_acc_d = np.exp(-mae_d / mad_d)
+
+        baseline_d = np.zeros_like(gt_d)
+        baseline_mae_d = np.sum(w * np.abs(baseline_d - gt_d))
+        baseline_acc_d = np.exp(-baseline_mae_d / mad_d)
+
+        advantage_d = base_acc_d - baseline_acc_d
+        delta_adv_term = 1.0 / (1.0 + np.exp(-5.0 * advantage_d))
+
+    hist_var = np.var(hist) + 1e-8
     pred_var = np.var(predictions)
     required = min_var_frac * hist_var
-    var_penalty = np.maximum(0.0, (required - pred_var) / required)
-    var_term = np.exp(-var_penalty)  # ∈ (0,1], lower if too flat
+    var_penalty = max(0.0, (required - pred_var) / required)
+    var_term = np.exp(-var_penalty)
 
-    # ----- 4. Combine terms -----
-    # weights: advantage 0.6, variance 0.4 (tune as needed)
-    reward = 0.6 * adv_term + 0.4 * var_term
+    delta_w = (delta_weight if use_delta else 0.0)
+    var_w = max(0.0, min(1.0, var_weight))
+    adv_w = max(0.0, 1.0 - var_w - delta_w)
 
-    # clamp numeric range
-    reward = float(np.clip(reward, 0.0, 1.0))
-    return reward
+    reward = adv_w * adv_term + delta_w * delta_adv_term + var_w * var_term
+    return float(np.clip(reward, 0.0, 1.0))
 
 @register("timeseries")
 class TimeSeriesRewardManager(AbstractRewardManager):
-    """Reward manager for time series code generation tasks"""
-    
+    """Reward manager for time series code generation tasks (parallel, per-job artifacts)."""
+
     def __init__(self, tokenizer, num_examine, compute_score=None, reward_fn_key="data_source"):
         self.tokenizer = tokenizer
         self.num_examine = num_examine
         self.reward_fn_key = reward_fn_key
         self.buffer = np.zeros(100, dtype=bool)
         self.save_idx = 0
-        
-    def __call__(self, data: DataProto, return_dict: bool = False):
-        reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32)
-        reward_extra_info = defaultdict(list)
-        
-        execution_successes = []
-        already_printed = 0
 
+    def __call__(self, data: DataProto, return_dict: bool = False):
+        device = data.batch['responses'].device
+        reward_tensor = torch.zeros_like(data.batch['responses'], dtype=torch.float32, device=device)
+        reward_extra_info = defaultdict(list)
+
+        # -------- 1) Build job list with UNIQUE job_id per item --------
+        jobs = []
         for i in range(len(data)):
-            data_item = data[i]
-            
-            # Decode prompt and response
-            prompt_ids = data_item.batch['prompts']
+            item = data[i]
+
+            prompt_ids = item.batch['prompts']
             prompt_length = prompt_ids.shape[-1]
-            valid_prompt_length = data_item.batch['attention_mask'][:prompt_length].sum()
+            attn = item.batch['attention_mask']
+            if torch.is_tensor(attn):
+                valid_prompt_length  = int(attn[:prompt_length].sum().item())
+                valid_response_length = int(attn[prompt_length:].sum().item())
+            else:
+                valid_prompt_length  = int(attn[:prompt_length].sum())
+                valid_response_length = int(attn[prompt_length:].sum())
+
             valid_prompt_ids = prompt_ids[-valid_prompt_length:]
-            
-            response_ids = data_item.batch['responses']
-            valid_response_length = data_item.batch['attention_mask'][prompt_length:].sum()
+            response_ids = item.batch['responses']
             valid_response_ids = response_ids[:valid_response_length]
-            
+
             prompt_str = self.tokenizer.decode(valid_prompt_ids, skip_special_tokens=True)
             response_str = self.tokenizer.decode(valid_response_ids, skip_special_tokens=True)
-            
-            # Get data from extra_info in parquet
-            extra_info = data_item.non_tensor_batch.get('extra_info', {})
+
+            extra_info = item.non_tensor_batch.get('extra_info', {})
             historical_data = extra_info.get('past_data', [])
             ground_truth = extra_info.get('future_data', [])
-            train_dir = data_item.non_tensor_batch.get('train_dir', '')
-            val_dir = data_item.non_tensor_batch.get('val_dir', '')
-            
+            train_dir = item.non_tensor_batch.get('train_dir', '')
+            val_dir = item.non_tensor_batch.get('val_dir', '')
+
             if isinstance(historical_data, str):
                 historical_data = ast.literal_eval(historical_data)
             if isinstance(ground_truth, str):
                 ground_truth = ast.literal_eval(ground_truth)
             if isinstance(ground_truth, list):
-                ground_truth = np.array(ground_truth)
-            
-            future_count = len(ground_truth)
-            
-            # Execute code
-            try:
-                exe_reward, predictions, error_msg = execute_code_safely(
-                    response_str, historical_data, future_count, train_dir, val_dir
-                )
-                
-                execution_success = exe_reward > 0.5
-                execution_successes.append(execution_success)
-                
-                self.buffer[self.save_idx % len(self.buffer)] = execution_success
-                self.save_idx += 1
-                
-                # Calculate accuracy reward
-                if predictions is None:
-                    accuracy_reward = 0.0
-                    predictions = np.zeros(future_count)
-                else:
+                ground_truth = np.array(ground_truth, dtype=float)
+
+            job_id = f"{uuid.uuid4().hex[:8]}_{i}"  # UNIQUE per item, thread-safe
+
+            jobs.append({
+                "idx": i,
+                "job_id": job_id,
+                "valid_response_length": valid_response_length,
+                "prompt_str": prompt_str,
+                "response_str": response_str,
+                "historical_data": np.array(historical_data, dtype=float),
+                "ground_truth": ground_truth,
+                "future_count": len(ground_truth),
+                "train_dir": train_dir,
+                "val_dir": val_dir,
+            })
+
+        # -------- 2) Run in waves with max concurrency --------
+        prints = 0
+        for start in range(0, len(jobs), MAX_CONCURRENT):
+            batch = jobs[start:start + MAX_CONCURRENT]
+            with ThreadPoolExecutor(max_workers=min(MAX_CONCURRENT, len(batch))) as ex:
+                futures = {ex.submit(
+                    execute_code_safely,
+                    j["response_str"], j["job_id"], j["historical_data"], j["future_count"], j["train_dir"], j["val_dir"]
+                ): j for j in batch}
+
+                for fut, j in futures.items():
                     try:
-                        accuracy_reward = calculate_forecasting_reward(predictions, ground_truth, historical_data)
+                        exe_reward, predictions, error_msg = fut.result()
                     except Exception as e:
+                        exe_reward, predictions, error_msg = 0.0, None, f"Executor exception: {e}"
+                        _log_error(j["job_id"], error_msg, "")
+
+                    # --- execution gate: small negative on failure; else accuracy-only ---
+                    if predictions is None:
                         accuracy_reward = 0.0
-                        predictions = np.zeros(future_count)
-                
-                # Weighted combination: 50% execution, 50% accuracy
-                total_score = 0.5 * exe_reward + 0.5 * accuracy_reward
-                
-                reward_tensor[i, valid_response_length - 1] = total_score
-                
-                # Store extra info
-                reward_extra_info["execution_success"].append(execution_success)
-                reward_extra_info["accuracy_reward"].append(accuracy_reward)
-                reward_extra_info["total_score"].append(total_score)
-                
-            except Exception as e:
-                reward_tensor[i, valid_response_length - 1] = 0.0
-                execution_successes.append(False)
-                reward_extra_info["execution_success"].append(False)
-                reward_extra_info["accuracy_reward"].append(0.0)
-                reward_extra_info["total_score"].append(0.0)
-            
-            # Print examples for debugging
-            if already_printed < self.num_examine:
-                already_printed += 1
-                print("[Time Series Code Generation Reward]")
-                print("[prompt]", prompt_str[:200] + "..." if len(prompt_str) > 200 else prompt_str)
-                print("[response]", response_str[:200] + "..." if len(response_str) > 200 else response_str)
-                print("[execution_success]", execution_successes[-1])
-                print("[total_score]", reward_tensor[i, valid_response_length - 1].item())
-        
-        # Print format success rate
+                        total_score = -0.05
+                        execution_success = False
+                    else:
+                        try:
+                            accuracy_reward = calculate_forecasting_reward(
+                                predictions, j["ground_truth"], j["historical_data"],
+                                tail_gamma=1.25, min_var_frac=0.05,
+                                use_delta=True, delta_weight=0.10, var_weight=0.30
+                            )
+                        except Exception as e:
+                            accuracy_reward = 0.0
+                        total_score = float(accuracy_reward)
+                        execution_success = True
+
+                    # place reward on last token
+                    vr = j["valid_response_length"]
+                    if vr > 0:
+                        reward_tensor[j["idx"], vr - 1] = total_score
+
+                    # telemetry
+                    self.buffer[self.save_idx % len(self.buffer)] = execution_success
+                    self.save_idx += 1
+
+                    reward_extra_info["job_id"].append(j["job_id"])
+                    reward_extra_info["execution_success"].append(execution_success)
+                    reward_extra_info["accuracy_reward"].append(float(accuracy_reward))
+                    reward_extra_info["total_score"].append(float(total_score))
+
+                    # limited prints
+                    if prints < self.num_examine:
+                        prints += 1
+                        print("[Time Series Code Generation Reward]")
+                        print("[job_id]", j["job_id"])
+                        print("[prompt]", j["prompt_str"][:200] + "..." if len(j["prompt_str"]) > 200 else j["prompt_str"])
+                        print("[response]", j["response_str"][:200] + "..." if len(j["response_str"]) > 200 else j["response_str"])
+                        print("[execution_success]", execution_success)
+                        print("[total_score]", total_score)
+
         if self.save_idx >= 100:
-            print("[Format success rate]:", self.buffer.mean())
-        
+            print("[Format success rate]:", float(self.buffer.mean()))
+
         if return_dict:
-            return {
-                "reward_tensor": reward_tensor,
-                "reward_extra_info": reward_extra_info,
-            }
-        else:
-            return reward_tensor
+            return {"reward_tensor": reward_tensor, "reward_extra_info": reward_extra_info}
+        return reward_tensor
