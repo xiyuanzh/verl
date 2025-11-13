@@ -10,12 +10,31 @@ from datasets import Dataset, DatasetDict
 import random
 from verl.ts_models.ts_forecasting_template import TSFM_TEMPLATES, LLM_FORECASTING_TEMPLATES, UNIMODAL_FORECASTING_TEMPLATES
 
-MODEL_POOL = [
+TSFM_POOL = [
+    # chronos
+    "amazon/chronos-t5-mini",
     "amazon/chronos-t5-small",
+    "amazon/chronos-t5-base",
+    "amazon/chronos-t5-large",
+    # chronos-bolt
+    "amazon/chronos-bolt-mini",
+    "amazon/chronos-bolt-small",
+    "amazon/chronos-bolt-base",
+    # chronos-2
+    "amazon/chronos-2",
+]
+UNIMODAL_POOL = [
     "PatchTST",
     "DLinear",
     "iTransformer",
+]
+LLM_POOL = [
     "gpt2",
+]
+MODEL_POOL = [
+    TSFM_POOL,
+    UNIMODAL_POOL,
+    LLM_POOL
 ]
 
 def get_code_files(sft_dir):
@@ -55,13 +74,14 @@ def create_code_generation_example(past_data, future_data, context, task_folder,
             cov_values = [round(past_data.iloc[i, j], 2) for j in range(1, past_data.shape[1]-1)]
             covariate_values.append(cov_values)
     
-    selected_model = random.choice(MODEL_POOL)
-    if "chronos" in selected_model:
+    selected_model_type = random.choice(MODEL_POOL)
+    selected_model = random.choice(selected_model_type)
+    if selected_model_type == TSFM_POOL:
         selected_template = TSFM_TEMPLATES(selected_model)
-    elif "gpt2" in selected_model:
-        selected_template = LLM_FORECASTING_TEMPLATES(selected_model)
-    else:
+    elif selected_model_type == UNIMODAL_POOL:
         selected_template = UNIMODAL_FORECASTING_TEMPLATES(selected_model)
+    elif selected_model_type == LLM_POOL:
+        selected_template = LLM_FORECASTING_TEMPLATES(selected_model)
     
     # Create input prompt
     input_prompt = f"""Multimodal Time Series Forecasting Challenge
@@ -245,8 +265,8 @@ def main(args):
     train_df = pd.DataFrame(train_examples)
     test_df = pd.DataFrame(test_examples)
     
-    train_df.to_parquet(output_dir / 'train_path.parquet', index=False)
-    test_df.to_parquet(output_dir / 'test_path.parquet', index=False)
+    train_df.to_parquet(output_dir / 'train_0026.parquet', index=False)
+    test_df.to_parquet(output_dir / 'test_0026.parquet', index=False)
     
     print(f"Parquet files saved to {output_dir}")
     print(f"Train samples: {len(train_examples)}")
@@ -256,6 +276,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--cik_dir', type=str, default='/fsx/chronos-o1/dataset/finance-7/')
     parser.add_argument('--sft_dir', type=str, default='/fsx/chronos-o1/sft/')
-    parser.add_argument('--output_dir', type=str, default='./')
+    parser.add_argument('--output_dir', type=str, default='/fsx/s3/chronos-o1/dataset/parquet')
     args = parser.parse_args()
     main(args)

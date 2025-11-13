@@ -99,6 +99,25 @@ verl is fast with:
 
 ## Getting Started
 
+### Install
+
+```bash
+# Create conda environment
+conda create -n verl python==3.12
+conda activate verl
+
+# If you simply need to run with FSDP
+USE_MEGATRON=0 bash scripts/install_vllm_sglang_mcore.sh
+
+# Clone the repo and install verl from source
+git clone git@github.com:xiyuanzh/verl.git
+cd verl
+pip install --no-deps -e .
+
+# Install time series related packages
+pip install -r requirements-ts.txt
+```
+
 <a href="https://verl.readthedocs.io/en/latest/index.html"><b>Documentation</b></a>
 
 **Quickstart:**
