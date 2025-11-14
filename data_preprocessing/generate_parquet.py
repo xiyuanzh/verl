@@ -8,6 +8,7 @@ import pandas as pd
 from pathlib import Path
 from datasets import Dataset, DatasetDict
 import random
+import yaml
 from verl.ts_models.ts_forecasting_template import TSFM_TEMPLATES, LLM_FORECASTING_TEMPLATES, UNIMODAL_FORECASTING_TEMPLATES
 
 TSFM_POOL = [
@@ -58,7 +59,7 @@ def get_random_code_sample(code_files):
     except:
         return "# Error reading code file"
 
-def create_code_generation_example(past_data, future_data, context, task_folder, sample_idx, code_files, data_split):
+def create_code_generation_example(past_data, future_data, context, task_folder, sample_idx, code_files, data_split, base_data_path):
     """Create code generation example from raw data"""
     # Extract timestamps, covariates, and target values
     timestamps = past_data.iloc[:, 0].tolist()
@@ -213,13 +214,13 @@ Remember to avoid future information leakage in your model development process. 
                 "content": input_prompt
             }
         ],
-        "train_dir": "/fsx/mmts/raw/train",
-        "val_dir": f"/fsx/mmts/raw/{data_split}/{sample_idx}"
+        "train_dir": f"{base_data_path}/train",
+        "val_dir": f"{base_data_path}/{data_split}/{sample_idx}"
     }
 
     return example
 
-def build_code_dataset(data_dir, code_files, data_split):
+def build_code_dataset(data_dir, code_files, data_split, base_data_path):
     """Build code generation dataset for train/test split"""
     examples = []
     
@@ -238,35 +239,43 @@ def build_code_dataset(data_dir, code_files, data_split):
         
         # Create code generation example
         example = create_code_generation_example(
-            past_data, future_data, context, str(data_dir), sample_idx, code_files, data_split
+            past_data, future_data, context, str(data_dir), sample_idx, code_files, data_split, train_dir_path
         )
         examples.append(example)
 
     return examples
 
+def load_config(config_path):
+    """Load configuration from YAML file"""
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
 def main(args):
+    # Load configuration from YAML file
+    config = load_config(args.config)
+    
     # Create output directories
-    output_dir = Path(args.output_dir)
+    output_dir = Path(config['output_dir'])
     output_dir.mkdir(exist_ok=True)
     
     # Build code files list once
-    code_files = get_code_files(args.sft_dir)
+    code_files = get_code_files(config['sft_dir'])
     
     # Get all task folders
-    data_path = Path(args.cik_dir)
+    data_path = Path(config['cik_dir'])
     train_dir = data_path / 'val'
     test_dir = data_path / 'test'
     
     # Build datasets
-    train_examples = build_code_dataset(train_dir, code_files, 'val')
-    test_examples = build_code_dataset(test_dir, code_files, 'test')
+    train_examples = build_code_dataset(train_dir, code_files, 'val', config['base_data_path'])
+    test_examples = build_code_dataset(test_dir, code_files, 'test', config['base_data_path'])
     
     # Save as parquet files
     train_df = pd.DataFrame(train_examples)
     test_df = pd.DataFrame(test_examples)
     
-    train_df.to_parquet(output_dir / 'train_0026.parquet', index=False)
-    test_df.to_parquet(output_dir / 'test_0026.parquet', index=False)
+    train_df.to_parquet(output_dir / config['train_parquet_name'], index=False)
+    test_df.to_parquet(output_dir / config['test_parquet_name'], index=False)
     
     print(f"Parquet files saved to {output_dir}")
     print(f"Train samples: {len(train_examples)}")
@@ -274,8 +283,7 @@ def main(args):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cik_dir', type=str, default='/fsx/chronos-o1/dataset/finance-7/')
-    parser.add_argument('--sft_dir', type=str, default='/fsx/chronos-o1/sft/')
-    parser.add_argument('--output_dir', type=str, default='/fsx/s3/chronos-o1/dataset/parquet')
+    default_config = Path(__file__).parent / 'config.yaml'
+    parser.add_argument('--config', type=str, default=str(default_config), help='Path to YAML configuration file')
     args = parser.parse_args()
     main(args)

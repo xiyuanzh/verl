@@ -9,6 +9,7 @@ from pathlib import Path
 from datasets import Dataset, DatasetDict
 import random
 from tqdm import tqdm
+import yaml
 from verl.ts_models.ts_forecasting_template import TSFM_TEMPLATES, LLM_FORECASTING_TEMPLATES, UNIMODAL_FORECASTING_TEMPLATES
 
 MODEL_POOL = [
@@ -40,7 +41,7 @@ def get_random_code_sample(code_files):
     except:
         return "# Error reading code file"
 
-def create_code_generation_example(past_data, future_data, context, task_folder, sample_idx, code_files, data_split, cik_dir):
+def create_code_generation_example(past_data, future_data, context, task_folder, sample_idx, code_files, data_split, cik_dir, base_data_path):
     """Create code generation example from raw data"""
     # Extract timestamps, covariates, and target values
     timestamps = past_data.iloc[:, 0].tolist()
@@ -195,13 +196,13 @@ Remember to avoid future information leakage in your model development process. 
             }
         ],
         "data_source" : Path(cik_dir).name,
-        "train_dir": f"/fsx/ubuntu/users/boranhan/mmts/all_data/{Path(cik_dir).name}/train",
-        "val_dir": f"/fsx/ubuntu/users/boranhan/mmts/all_data/{Path(cik_dir).name}/{data_split}/{sample_idx}"
+        "train_dir": f"{base_data_path}/{Path(cik_dir).name}/train",
+        "val_dir": f"{base_data_path}/{Path(cik_dir).name}/{data_split}/{sample_idx}"
     }
 
     return example
 
-def build_code_dataset(data_dir, code_files, data_split, cik_dir, sample_indices):
+def build_code_dataset(data_dir, code_files, data_split, cik_dir, sample_indices, base_data_path):
     """Build code generation dataset for specified sample indices"""
     examples = []
     
@@ -227,7 +228,7 @@ def build_code_dataset(data_dir, code_files, data_split, cik_dir, sample_indices
 
         # Create code generation example
         example = create_code_generation_example(
-            past_data, future_data, context, str(data_dir), sample_idx, code_files, data_split, cik_dir
+            past_data, future_data, context, str(data_dir), sample_idx, code_files, data_split, cik_dir, base_data_path
         )
         examples.append(example)
 
@@ -240,23 +241,31 @@ def sample_indices(total_count, target_count):
         return all_indices
     return sorted(random.sample(all_indices, target_count))
 
+def load_config(config_path):
+    """Load configuration from YAML file"""
+    with open(config_path, 'r') as f:
+        return yaml.safe_load(f)
+
 def main(args):
+    # Load configuration from YAML file
+    config = load_config(args.config)
+    
     # Set random seed for reproducibility
-    random.seed(args.seed)
+    random.seed(config.get('seed', 42))
     
     # Create output directories
-    output_dir = Path(args.output_dir)
+    output_dir = Path(config['output_dir'])
     output_dir.mkdir(exist_ok=True)
     
     # Build code files list once
-    code_files = get_code_files(args.sft_dir)
+    code_files = get_code_files(config['sft_dir'])
     
     # Collect all examples from multiple cik_dirs
     all_train_examples = []
     all_eval_examples = []
     all_test_examples = []
     
-    for cik_dir in tqdm(args.cik_dirs):
+    for cik_dir in tqdm(config['cik_dirs']):
         data_path = Path(cik_dir)
         val_dir = data_path / 'val'
         test_dir = data_path / 'test'
@@ -266,21 +275,21 @@ def main(args):
             val_sample_dirs = [d for d in val_dir.iterdir() if d.is_dir() and d.name.isdigit()]
             total_val_samples = len(val_sample_dirs)
             
-            # Sample 200 for training and 50 for eval from val directory
-            train_sample_indices = sample_indices(total_val_samples, args.train_samples)
+            # Sample for training and eval from val directory
+            train_sample_indices = sample_indices(total_val_samples, config.get('train_samples', 200))
             
             # For eval, sample from remaining indices if possible
             remaining_indices = [i for i in range(1, total_val_samples + 1) if i not in train_sample_indices]
             if remaining_indices:
-                eval_sample_indices = sample_indices(len(remaining_indices), args.eval_samples)
+                eval_sample_indices = sample_indices(len(remaining_indices), config.get('eval_samples', 50))
                 eval_sample_indices = [remaining_indices[i-1] for i in eval_sample_indices]
             else:
                 # If not enough samples, use overlapping samples
-                eval_sample_indices = sample_indices(total_val_samples, args.eval_samples)
+                eval_sample_indices = sample_indices(total_val_samples, config.get('eval_samples', 50))
             
             # Build datasets
-            train_examples = build_code_dataset(val_dir, code_files, 'val', cik_dir, train_sample_indices)
-            eval_examples = build_code_dataset(val_dir, code_files, 'val', cik_dir, eval_sample_indices)
+            train_examples = build_code_dataset(val_dir, code_files, 'val', cik_dir, train_sample_indices, config['base_data_path'])
+            eval_examples = build_code_dataset(val_dir, code_files, 'val', cik_dir, eval_sample_indices, config['base_data_path'])
             
             all_train_examples.extend(train_examples)
             all_eval_examples.extend(eval_examples)
@@ -290,16 +299,16 @@ def main(args):
             test_sample_dirs = [d for d in test_dir.iterdir() if d.is_dir() and d.name.isdigit()]
             total_test_samples = len(test_sample_dirs)
             
-            # Sample 50 for test
-            test_sample_indices = sample_indices(total_test_samples, args.test_samples)
-            test_examples = build_code_dataset(test_dir, code_files, 'test', cik_dir, test_sample_indices)
+            # Sample for test
+            test_sample_indices = sample_indices(total_test_samples, config.get('test_samples', 50))
+            test_examples = build_code_dataset(test_dir, code_files, 'test', cik_dir, test_sample_indices, config['base_data_path'])
             all_test_examples.extend(test_examples)
     
     # Save as parquet files
     train_df = pd.DataFrame(all_train_examples)
     eval_df = pd.DataFrame(all_eval_examples)
-    train_df.to_parquet(output_dir / 'all_train_path_filter.parquet', index=False)
-    eval_df.to_parquet(output_dir / 'all_eval_path_filter.parquet', index=False)
+    train_df.to_parquet(output_dir / config['train_parquet_name'], index=False)
+    eval_df.to_parquet(output_dir / config['eval_parquet_name'], index=False)
     
     print(f"Parquet files saved to {output_dir}")
     print(f"Train samples: {len(all_train_examples)}")
@@ -307,27 +316,14 @@ def main(args):
     
     if all_test_examples:
         test_df = pd.DataFrame(all_test_examples)
-        test_df.to_parquet(output_dir / 'all_test_path_filter.parquet', index=False)
+        test_df.to_parquet(output_dir / config['test_parquet_name'], index=False)
         print(f"Test samples: {len(all_test_examples)}")
     else:
         print("No test samples found")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cik_dirs', type=str, nargs='+', 
-                        default=['/fsx/ubuntu/users/boranhan/mmts/all_data/dataset/finance-7/', 
-                                '/fsx/ubuntu/users/boranhan/mmts/all_data/dataset/finance-30/', 
-                                '/fsx/ubuntu/users/boranhan/mmts/all_data/dataset/LEU/',
-                                '/fsx/ubuntu/users/boranhan/mmts/all_data/dataset/MSPG/',
-                                '/fsx/ubuntu/users/boranhan/mmts/all_data/dataset/PTF/',
-                                '/fsx/ubuntu/users/boranhan/mmts/all_data/dataset/medical/',
-                                '/fsx/ubuntu/users/boranhan/mmts/all_data/dataset/weather/'
-                        ], help='List of cik directories')
-    parser.add_argument('--sft_dir', type=str, default='/fsx/ubuntu/users/boranhan/mmts/data/sft/')
-    parser.add_argument('--output_dir', type=str, default='/fsx/ubuntu/users/boranhan/mmts/data/parquet/')
-    parser.add_argument('--train_samples', type=int, default=200, help='Number of samples for training')
-    parser.add_argument('--eval_samples', type=int, default=50, help='Number of samples for evaluation')
-    parser.add_argument('--test_samples', type=int, default=50, help='Number of samples for test')
-    parser.add_argument('--seed', type=int, default=42, help='Random seed for reproducibility')
+    default_config = Path(__file__).parent / 'config_all_domains_sampling.yaml'
+    parser.add_argument('--config', type=str, default=str(default_config), help='Path to YAML configuration file')
     args = parser.parse_args()
     main(args)

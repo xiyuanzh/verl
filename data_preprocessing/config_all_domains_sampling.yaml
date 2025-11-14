@@ -1,0 +1,33 @@
+# Configuration file for generate_parquet_all_domains_sampling.py
+
+# Base data path for train_dir and val_dir generation
+base_data_path: /fsx/mmts
+
+# List of CiK directories to process
+cik_dirs:
+  - /fsx/chronos-o1/dataset/finance-7/
+  - /fsx/chronos-o1/dataset/finance-30/
+  - /fsx/chronos-o1/dataset/LEU/
+  - /fsx/chronos-o1/dataset/MSPG/
+  - /fsx/chronos-o1/dataset/PTF/
+  - /fsx/chronos-o1/dataset/medical/
+  - /fsx/chronos-o1/dataset/weather/
+
+# Directory containing SFT (Supervised Fine-Tuning) code files
+sft_dir: /fsx/chronos-o1/sft/
+
+# Output directory for generated parquet files
+output_dir: /fsx/s3/chronos-o1/dataset/parquet/
+
+# Sampling configuration
+train_samples: 200  # Number of samples for training
+eval_samples: 50    # Number of samples for evaluation
+test_samples: 50    # Number of samples for test
+
+# Random seed for reproducibility
+seed: 42
+
+# Output parquet file names
+train_parquet_name: all_train_path_filter.parquet
+eval_parquet_name: all_eval_path_filter.parquet
+test_parquet_name: all_test_path_filter.parquet

@@ -1,0 +1,17 @@
+# Configuration file for generate_parquet.py
+
+# Base data path for train_dir and val_dir generation
+base_data_path: /fsx/mmts/raw
+
+# CiK directory to process
+cik_dir: /fsx/chronos-o1/dataset/finance-7/
+
+# Directory containing SFT (Supervised Fine-Tuning) code files
+sft_dir: /fsx/chronos-o1/sft/
+
+# Output directory for generated parquet files
+output_dir: /fsx/s3/chronos-o1/dataset/parquet
+
+# Output parquet file names
+train_parquet_name: train_0026.parquet
+test_parquet_name: test_0026.parquet
