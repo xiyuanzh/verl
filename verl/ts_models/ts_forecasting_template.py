@@ -78,7 +78,8 @@ def UNIMODAL_FORECASTING_TEMPLATES(model_name):
         IMPORTANT REQUIREMENTS:
         1. Use correct import path: from verl.ts_models.{model_name} import Model
         2. Import the model directly and do not create your own {model_name}
-        3. The Config class must contain ALL the following attributes and you may not use the given values and instead assign more appropriate values.
+        3. The Config class must contain ALL the following attributes and you may not use the given values and instead assign more appropriate values
+        4. You MUST train the model before doing inference. Do not directly perform inference on an untrained model
 
         ```python
         from verl.ts_models.{model_name} import Model

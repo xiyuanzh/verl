@@ -239,7 +239,7 @@ def build_code_dataset(data_dir, code_files, data_split, base_data_path):
         
         # Create code generation example
         example = create_code_generation_example(
-            past_data, future_data, context, str(data_dir), sample_idx, code_files, data_split, train_dir_path
+            past_data, future_data, context, str(data_dir), sample_idx, code_files, data_split, base_data_path
         )
         examples.append(example)
 
